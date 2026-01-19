@@ -2,7 +2,7 @@
 <html lang="th">
  <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ระบบจัดการคลังสินค้า</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
@@ -58,7 +58,7 @@
   <div id="loading-overlay" class="loading-overlay hidden">
    <div class="bg-white rounded-lg p-6 flex flex-col items-center gap-3">
     <div class="spinner" style="border-top-color: #3b82f6; border-width: 4px; width: 40px; height: 40px;"></div>
-    <p class="text-gray-700 font-medium">กำลังบันทึกข้อมูล...</p>
+    <p id="loading-text" class="text-gray-700 font-medium">กำลังประมวลผล...</p>
    </div>
   </div>
   <script>
@@ -78,6 +78,102 @@
     const auth = firebase.auth();
     const db = firebase.firestore();
 
+    // Pagination State
+    const paginationState = {
+      stock: { currentPage: 1, itemsPerPage: 20 },
+      receive: { currentPage: 1, itemsPerPage: 20 },
+      issue: { currentPage: 1, itemsPerPage: 20 }
+    };
+
+    // Filter State
+    const filterState = {
+      receive: {
+        startDate: null,
+        endDate: null,
+        productId: null,
+        ivNumber: null
+      },
+      issue: {
+        startDate: null,
+        endDate: null,
+        productId: null,
+        ivNumber: null
+      },
+      stock: {
+        searchTerm: ''
+      }
+    };
+
+    // Pagination Helper Functions
+    function paginateArray(array, page, itemsPerPage) {
+      const startIndex = (page - 1) * itemsPerPage;
+      const endIndex = startIndex + itemsPerPage;
+      return array.slice(startIndex, endIndex);
+    }
+
+    function createPaginationControls(totalItems, currentPage, itemsPerPage, onChangeFunction) {
+      const totalPages = Math.ceil(totalItems / itemsPerPage);
+      
+      if (totalPages <= 1) return '';
+      
+      const startItem = (currentPage - 1) * itemsPerPage + 1;
+      const endItem = Math.min(currentPage * itemsPerPage, totalItems);
+      
+      let pageNumbers = [];
+      
+      if (totalPages <= 7) {
+        pageNumbers = Array.from({ length: totalPages }, (_, i) => i + 1);
+      } else {
+        if (currentPage <= 4) {
+          pageNumbers = [1, 2, 3, 4, 5, '...', totalPages];
+        } else if (currentPage >= totalPages - 3) {
+          pageNumbers = [1, '...', totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
+        } else {
+          pageNumbers = [1, '...', currentPage - 1, currentPage, currentPage + 1, '...', totalPages];
+        }
+      }
+      
+      return `
+        <div class="flex flex-col sm:flex-row items-center justify-between gap-4 mt-4 pt-4 border-t">
+          <div class="text-sm text-gray-600">
+            แสดง ${startItem}-${endItem} จาก ${totalItems} รายการ
+          </div>
+          
+          <div class="flex items-center gap-2">
+            <button 
+              onclick="${onChangeFunction}(${currentPage - 1})"
+              ${currentPage === 1 ? 'disabled' : ''}
+              class="px-3 py-1 border rounded ${currentPage === 1 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-50'}"
+            >
+              ก่อนหน้า
+            </button>
+            
+            ${pageNumbers.map(page => {
+              if (page === '...') {
+                return '<span class="px-3 py-1">...</span>';
+              }
+              return `
+                <button 
+                  onclick="${onChangeFunction}(${page})"
+                  class="px-3 py-1 border rounded ${page === currentPage ? 'bg-primary text-white' : 'hover:bg-gray-50'}"
+                >
+                  ${page}
+                </button>
+              `;
+            }).join('')}
+            
+            <button 
+              onclick="${onChangeFunction}(${currentPage + 1})"
+              ${currentPage === totalPages ? 'disabled' : ''}
+              class="px-3 py-1 border rounded ${currentPage === totalPages ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-50'}"
+            >
+              ถัดไป
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
     // Helper function สำหรับการปัดเศษทศนิยม 2 ตำแหน่ง
     function roundTo2Decimal(num) {
       return Math.round(num * 100) / 100;
@@ -85,7 +181,7 @@
 
     // Helper function สำหรับการแสดงผลตัวเลขแบบมีทศนิยม 2 ตำแหน่ง
     function formatNumber(num) {
-      return num.toLocaleString('th-TH', {minimumFractionDigits: 2, maximumFractionDigals: 2});
+      return num.toLocaleString('th-TH', {minimumFractionDigits: 2, maximumFractionDigits: 2});
     }
 
     // Helper function สำหรับแปลงวันที่เป็น DD/MM/YYYY (พ.ศ.)
@@ -149,7 +245,8 @@
     let productStockByIV = {};
 
     // Loading State Management
-    function showLoading() {
+    function showLoading(message = 'กำลังประมวลผล...') {
+      document.getElementById('loading-text').textContent = message;
       document.getElementById('loading-overlay').classList.remove('hidden');
     }
 
@@ -373,6 +470,91 @@
         .map(([iv, qty]) => ({ iv, qty: roundTo2Decimal(qty) }));
     }
 
+    // Filter Functions
+    function getFilteredReceiveMovements() {
+      let movements = stockMovements.filter(m => m.type === 'receive');
+      
+      if (filterState.receive.startDate) {
+        movements = movements.filter(m => {
+          if (!m.timestamp) return false;
+          const movementDate = m.timestamp.toDate();
+          const startDate = new Date(filterState.receive.startDate);
+          startDate.setHours(0, 0, 0, 0);
+          return movementDate >= startDate;
+        });
+      }
+      
+      if (filterState.receive.endDate) {
+        movements = movements.filter(m => {
+          if (!m.timestamp) return false;
+          const movementDate = m.timestamp.toDate();
+          const endDate = new Date(filterState.receive.endDate);
+          endDate.setHours(23, 59, 59, 999);
+          return movementDate <= endDate;
+        });
+      }
+      
+      if (filterState.receive.productId) {
+        movements = movements.filter(m => m.productId === filterState.receive.productId);
+      }
+      
+      if (filterState.receive.ivNumber) {
+        movements = movements.filter(m => 
+          m.ivNumber && m.ivNumber.toLowerCase().includes(filterState.receive.ivNumber.toLowerCase())
+        );
+      }
+      
+      return movements;
+    }
+
+    function getFilteredIssueMovements() {
+      let movements = stockMovements.filter(m => m.type === 'issue');
+      
+      if (filterState.issue.startDate) {
+        movements = movements.filter(m => {
+          if (!m.timestamp) return false;
+          const movementDate = m.timestamp.toDate();
+          const startDate = new Date(filterState.issue.startDate);
+          startDate.setHours(0, 0, 0, 0);
+          return movementDate >= startDate;
+        });
+      }
+      
+      if (filterState.issue.endDate) {
+        movements = movements.filter(m => {
+          if (!m.timestamp) return false;
+          const movementDate = m.timestamp.toDate();
+          const endDate = new Date(filterState.issue.endDate);
+          endDate.setHours(23, 59, 59, 999);
+          return movementDate <= endDate;
+        });
+      }
+      
+      if (filterState.issue.productId) {
+        movements = movements.filter(m => m.productId === filterState.issue.productId);
+      }
+      
+      if (filterState.issue.ivNumber) {
+        movements = movements.filter(m => 
+          m.ivNumber && m.ivNumber.toLowerCase().includes(filterState.issue.ivNumber.toLowerCase())
+        );
+      }
+      
+      return movements;
+    }
+
+    function getFilteredStockProducts() {
+      let filtered = [...products];
+      
+      if (filterState.stock.searchTerm) {
+        filtered = filtered.filter(p => 
+          p.name.toLowerCase().includes(filterState.stock.searchTerm.toLowerCase())
+        );
+      }
+      
+      return filtered;
+    }
+
     async function addProduct(productData) {
       try {
         const duplicate = products.find(p => p.name.toLowerCase() === productData.name.toLowerCase());
@@ -388,7 +570,7 @@
           return { success: false, error: 'สต็อกขั้นต่ำต้องเป็นจำนวนบวก' };
         }
         
-        showLoading();
+        showLoading('กำลังเพิ่มสินค้า...');
         await db.collection('products').add({
           ...productData,
           createdAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -404,7 +586,7 @@
 
     async function updateProduct(productId, updates) {
       try {
-        showLoading();
+        showLoading('กำลังอัปเดตข้อมูล...');
         await db.collection('products').doc(productId).update(updates);
         await loadProducts();
         hideLoading();
@@ -422,7 +604,7 @@
           return { success: false, error: 'ไม่สามารถลบสินค้าที่มีสต็อกคงเหลืออยู่ได้' };
         }
         
-        showLoading();
+        showLoading('กำลังลบสินค้า...');
         await db.collection('products').doc(productId).delete();
         const movementsSnapshot = await db.collection('stockMovements')
           .where('productId', '==', productId).get();
@@ -474,7 +656,7 @@
           }
         }
         
-        showLoading();
+        showLoading('กำลังบันทึกข้อมูล...');
         
         // สร้าง timestamp จากวันที่ที่เลือก หรือใช้วันที่ปัจจุบัน
         let timestamp;
@@ -660,7 +842,7 @@
             <div class="card rounded-lg shadow p-6">
               <div class="flex items-center justify-between">
                 <div>
-                  <p class="text-gray-600 text-sm">สินค้าคงเหลังรวม</p>
+                  <p class="text-gray-600 text-sm">สินค้าคงเหลือรวม</p>
                   <p class="text-3xl font-bold text-primary">${formatNumber(totalStock)}</p>
                   <p class="text-sm text-gray-500 mt-1">หน่วย</p>
                 </div>
@@ -808,8 +990,14 @@
         <div class="space-y-6">
           <div class="flex justify-between items-center">
             <h2 class="text-2xl font-bold">สินค้าคงเหลือ</h2>
-            <input type="text" id="search-stock" placeholder="ค้นหาสินค้า..." 
-              class="px-4 py-2 border rounded-lg w-64 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <div class="flex gap-2">
+              <input type="text" id="search-stock" placeholder="ค้นหาสินค้า..." 
+                class="px-4 py-2 border rounded-lg w-64 focus:outline-none focus:ring-2 focus:ring-blue-500">
+              <button onclick="exportFilteredStock()" 
+                class="btn-primary text-white px-4 py-2 rounded-lg text-sm hover:opacity-90 whitespace-nowrap">
+                📊 Export
+              </button>
+            </div>
           </div>
           
           <div class="card rounded-lg shadow overflow-hidden">
@@ -833,19 +1021,15 @@
                 </tbody>
               </table>
             </div>
+            <div id="stock-pagination"></div>
           </div>
         </div>
       `;
     }
 
     function renderStockTableRows(searchTerm = '', sortBy = null) {
-      let filteredProducts = [...products];
-      
-      if (searchTerm) {
-        filteredProducts = filteredProducts.filter(p => 
-          p.name.toLowerCase().includes(searchTerm.toLowerCase())
-        );
-      }
+      filterState.stock.searchTerm = searchTerm;
+      let filteredProducts = getFilteredStockProducts();
       
       if (sortBy === 'name') {
         filteredProducts.sort((a, b) => a.name.localeCompare(b.name, 'th'));
@@ -853,7 +1037,25 @@
         filteredProducts.sort((a, b) => getCurrentStock(a.id) - getCurrentStock(b.id));
       }
       
-      return filteredProducts.map(p => {
+      // Update pagination
+      const paginationDiv = document.getElementById('stock-pagination');
+      if (paginationDiv) {
+        paginationDiv.innerHTML = createPaginationControls(
+          filteredProducts.length,
+          paginationState.stock.currentPage,
+          paginationState.stock.itemsPerPage,
+          'changeStockPage'
+        );
+      }
+      
+      // Paginate results
+      const paginatedProducts = paginateArray(
+        filteredProducts,
+        paginationState.stock.currentPage,
+        paginationState.stock.itemsPerPage
+      );
+      
+      return paginatedProducts.map(p => {
         const stock = getCurrentStock(p.id);
         const isLow = stock < p.minStock;
         
@@ -881,6 +1083,56 @@
       return `
         <div class="space-y-6">
           <h2 class="text-2xl font-bold">รับเข้าสินค้า</h2>
+          
+          <!-- ส่วนกรองขั้นสูง -->
+          <div class="card rounded-lg shadow p-4">
+            <div class="flex justify-between items-center mb-3">
+              <h3 class="font-bold">🔍 ค้นหาและกรอง</h3>
+              <button onclick="toggleReceiveFilter()" id="toggle-receive-filter" class="text-sm text-blue-600 hover:text-blue-800">
+                แสดงตัวกรอง ▼
+              </button>
+            </div>
+            <div id="receive-filter-panel" class="hidden">
+              <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div>
+                  <label class="block text-sm font-medium mb-1">วันที่เริ่มต้น</label>
+                  <input type="date" id="receive-filter-start" 
+                    class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium mb-1">วันที่สิ้นสุด</label>
+                  <input type="date" id="receive-filter-end" 
+                    class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium mb-1">สินค้า</label>
+                  <select id="receive-filter-product" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">-- ทั้งหมด --</option>
+                    ${products.map(p => `<option value="${p.id}">${p.name}</option>`).join('')}
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium mb-1">เลขที่ IV</label>
+                  <input type="text" id="receive-filter-iv" placeholder="ค้นหา IV..." 
+                    class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+              </div>
+              <div class="flex gap-2 mt-4">
+                <button onclick="applyReceiveFilter()" 
+                  class="btn-primary text-white px-4 py-2 rounded-lg text-sm hover:opacity-90">
+                  🔍 ค้นหา
+                </button>
+                <button onclick="clearReceiveFilter()" 
+                  class="border px-4 py-2 rounded-lg text-sm hover:bg-gray-50">
+                  ล้างตัวกรอง
+                </button>
+                <button onclick="exportFilteredReceive()" 
+                  class="btn-success text-white px-4 py-2 rounded-lg text-sm hover:opacity-90 ml-auto">
+                  📊 Export ที่กรอง
+                </button>
+              </div>
+            </div>
+          </div>
           
           <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div class="card rounded-lg shadow p-6">
@@ -955,10 +1207,10 @@
           
           <div class="card rounded-lg shadow p-6">
             <div class="flex justify-between items-center mb-4">
-              <h3 class="text-lg font-bold">ประวัติการรับเข้าล่าสุด</h3>
+              <h3 class="text-lg font-bold">ประวัติการรับเข้า</h3>
               <button onclick="exportReceiveHistory()" 
                 class="btn-primary text-white px-4 py-2 rounded-lg text-sm hover:opacity-90">
-                📊 Export Excel
+                📊 Export ทั้งหมด
               </button>
             </div>
             <div class="overflow-x-auto">
@@ -973,39 +1225,61 @@
                     <th class="text-center py-3 px-4">จัดการ</th>
                   </tr>
                 </thead>
-                <tbody>
-                  ${stockMovements
-                    .filter(m => m.type === 'receive')
-                    .slice(0, 10)
-                    .map(m => {
-                      const product = products.find(p => p.id === m.productId);
-                      const dateStr = m.timestamp ? formatDateThai(m.timestamp.toDate().toISOString().split('T')[0]) : '-';
-                      return `
-                        <tr class="border-b hover:bg-gray-50">
-                          <td class="py-3 px-4 text-sm">${dateStr}</td>
-                          <td class="py-3 px-4">${product?.name || '-'}</td>
-                          <td class="text-center py-3 px-4">${formatNumber(m.quantity)} ${product?.unit || ''}</td>
-                          <td class="text-center py-3 px-4">${m.poNumber || '-'}</td>
-                          <td class="text-center py-3 px-4 font-medium">${m.ivNumber}</td>
-                          <td class="text-center py-3 px-4">
-                            <button onclick="editStockMovement('${m.id}')" 
-                              class="text-blue-600 hover:text-blue-800 mr-2" title="แก้ไข">
-                              ✏️
-                            </button>
-                            <button onclick="deleteStockMovement('${m.id}')" 
-                              class="text-red-600 hover:text-red-800" title="ลบ">
-                              🗑️
-                            </button>
-                          </td>
-                        </tr>
-                      `;
-                    }).join('') || '<tr><td colspan="6" class="text-center py-8 text-gray-500">ยังไม่มีประวัติ</td></tr>'}
+                <tbody id="receive-history-body">
+                  ${renderReceiveHistoryRows()}
                 </tbody>
               </table>
             </div>
+            <div id="receive-pagination"></div>
           </div>
         </div>
       `;
+    }
+
+    function renderReceiveHistoryRows() {
+      const filteredMovements = getFilteredReceiveMovements();
+      
+      // Update pagination
+      const paginationDiv = document.getElementById('receive-pagination');
+      if (paginationDiv) {
+        paginationDiv.innerHTML = createPaginationControls(
+          filteredMovements.length,
+          paginationState.receive.currentPage,
+          paginationState.receive.itemsPerPage,
+          'changeReceivePage'
+        );
+      }
+      
+      // Paginate results
+      const paginatedMovements = paginateArray(
+        filteredMovements,
+        paginationState.receive.currentPage,
+        paginationState.receive.itemsPerPage
+      );
+      
+      return paginatedMovements.map(m => {
+        const product = products.find(p => p.id === m.productId);
+        const dateStr = m.timestamp ? formatDateThai(m.timestamp.toDate().toISOString().split('T')[0]) : '-';
+        return `
+          <tr class="border-b hover:bg-gray-50">
+            <td class="py-3 px-4 text-sm">${dateStr}</td>
+            <td class="py-3 px-4">${product?.name || '-'}</td>
+            <td class="text-center py-3 px-4">${formatNumber(m.quantity)} ${product?.unit || ''}</td>
+            <td class="text-center py-3 px-4">${m.poNumber || '-'}</td>
+            <td class="text-center py-3 px-4 font-medium">${m.ivNumber}</td>
+            <td class="text-center py-3 px-4">
+              <button onclick="editStockMovement('${m.id}')" 
+                class="text-blue-600 hover:text-blue-800 mr-2" title="แก้ไข">
+                ✏️
+              </button>
+              <button onclick="deleteStockMovement('${m.id}')" 
+                class="text-red-600 hover:text-red-800" title="ลบ">
+                🗑️
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('') || '<tr><td colspan="6" class="text-center py-8 text-gray-500">ไม่พบข้อมูล</td></tr>';
     }
 
     function renderIssue() {
@@ -1015,6 +1289,56 @@
       return `
         <div class="space-y-6">
           <h2 class="text-2xl font-bold">จ่ายออกสินค้า</h2>
+          
+          <!-- ส่วนกรองขั้นสูง -->
+          <div class="card rounded-lg shadow p-4">
+            <div class="flex justify-between items-center mb-3">
+              <h3 class="font-bold">🔍 ค้นหาและกรอง</h3>
+              <button onclick="toggleIssueFilter()" id="toggle-issue-filter" class="text-sm text-blue-600 hover:text-blue-800">
+                แสดงตัวกรอง ▼
+              </button>
+            </div>
+            <div id="issue-filter-panel" class="hidden">
+              <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div>
+                  <label class="block text-sm font-medium mb-1">วันที่เริ่มต้น</label>
+                  <input type="date" id="issue-filter-start" 
+                    class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium mb-1">วันที่สิ้นสุด</label>
+                  <input type="date" id="issue-filter-end" 
+                    class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                  <label class="block text-sm font-medium mb-1">สินค้า</label>
+                  <select id="issue-filter-product" class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                    <option value="">-- ทั้งหมด --</option>
+                    ${products.map(p => `<option value="${p.id}">${p.name}</option>`).join('')}
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-sm font-medium mb-1">เลขที่ IV</label>
+                  <input type="text" id="issue-filter-iv" placeholder="ค้นหา IV..." 
+                    class="w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+              </div>
+              <div class="flex gap-2 mt-4">
+                <button onclick="applyIssueFilter()" 
+                  class="btn-primary text-white px-4 py-2 rounded-lg text-sm hover:opacity-90">
+                  🔍 ค้นหา
+                </button>
+                <button onclick="clearIssueFilter()" 
+                  class="border px-4 py-2 rounded-lg text-sm hover:bg-gray-50">
+                  ล้างตัวกรอง
+                </button>
+                <button onclick="exportFilteredIssue()" 
+                  class="btn-danger text-white px-4 py-2 rounded-lg text-sm hover:opacity-90 ml-auto">
+                  📊 Export ที่กรอง
+                </button>
+              </div>
+            </div>
+          </div>
           
           <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div class="card rounded-lg shadow p-6">
@@ -1094,10 +1418,10 @@
           
           <div class="card rounded-lg shadow p-6">
             <div class="flex justify-between items-center mb-4">
-              <h3 class="text-lg font-bold">ประวัติการจ่ายออกล่าสุด</h3>
+              <h3 class="text-lg font-bold">ประวัติการจ่ายออก</h3>
               <button onclick="exportIssueHistory()" 
                 class="btn-primary text-white px-4 py-2 rounded-lg text-sm hover:opacity-90">
-                📊 Export Excel
+                📊 Export ทั้งหมด
               </button>
             </div>
             <div class="overflow-x-auto">
@@ -1112,39 +1436,61 @@
                     <th class="text-center py-3 px-4">จัดการ</th>
                   </tr>
                 </thead>
-                <tbody>
-                  ${stockMovements
-                    .filter(m => m.type === 'issue')
-                    .slice(0, 10)
-                    .map(m => {
-                      const product = products.find(p => p.id === m.productId);
-                      const dateStr = m.timestamp ? formatDateThai(m.timestamp.toDate().toISOString().split('T')[0]) : '-';
-                      return `
-                        <tr class="border-b hover:bg-gray-50">
-                          <td class="py-3 px-4 text-sm">${dateStr}</td>
-                          <td class="py-3 px-4">${product?.name || '-'}</td>
-                          <td class="text-center py-3 px-4">${formatNumber(m.quantity)} ${product?.unit || ''}</td>
-                          <td class="text-center py-3 px-4 font-medium">${m.ivNumber}</td>
-                          <td class="text-center py-3 px-4">${m.docNumber || '-'}</td>
-                          <td class="text-center py-3 px-4">
-                            <button onclick="editStockMovement('${m.id}')" 
-                              class="text-blue-600 hover:text-blue-800 mr-2" title="แก้ไข">
-                              ✏️
-                            </button>
-                            <button onclick="deleteStockMovement('${m.id}')" 
-                              class="text-red-600 hover:text-red-800" title="ลบ">
-                              🗑️
-                            </button>
-                          </td>
-                        </tr>
-                      `;
-                    }).join('') || '<tr><td colspan="6" class="text-center py-8 text-gray-500">ยังไม่มีประวัติ</td></tr>'}
+                <tbody id="issue-history-body">
+                  ${renderIssueHistoryRows()}
                 </tbody>
               </table>
             </div>
+            <div id="issue-pagination"></div>
           </div>
         </div>
       `;
+    }
+    
+    function renderIssueHistoryRows() {
+      const filteredMovements = getFilteredIssueMovements();
+      
+      // Update pagination
+      const paginationDiv = document.getElementById('issue-pagination');
+      if (paginationDiv) {
+        paginationDiv.innerHTML = createPaginationControls(
+          filteredMovements.length,
+          paginationState.issue.currentPage,
+          paginationState.issue.itemsPerPage,
+          'changeIssuePage'
+        );
+      }
+      
+      // Paginate results
+      const paginatedMovements = paginateArray(
+        filteredMovements,
+        paginationState.issue.currentPage,
+        paginationState.issue.itemsPerPage
+      );
+      
+      return paginatedMovements.map(m => {
+        const product = products.find(p => p.id === m.productId);
+        const dateStr = m.timestamp ? formatDateThai(m.timestamp.toDate().toISOString().split('T')[0]) : '-';
+        return `
+          <tr class="border-b hover:bg-gray-50">
+            <td class="py-3 px-4 text-sm">${dateStr}</td>
+            <td class="py-3 px-4">${product?.name || '-'}</td>
+            <td class="text-center py-3 px-4">${formatNumber(m.quantity)} ${product?.unit || ''}</td>
+            <td class="text-center py-3 px-4 font-medium">${m.ivNumber}</td>
+            <td class="text-center py-3 px-4">${m.docNumber || '-'}</td>
+            <td class="text-center py-3 px-4">
+              <button onclick="editStockMovement('${m.id}')" 
+                class="text-blue-600 hover:text-blue-800 mr-2" title="แก้ไข">
+                ✏️
+              </button>
+              <button onclick="deleteStockMovement('${m.id}')" 
+                class="text-red-600 hover:text-red-800" title="ลบ">
+                🗑️
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('') || '<tr><td colspan="6" class="text-center py-8 text-gray-500">ไม่พบข้อมูล</td></tr>';
     }
 
     function renderStockByIV() {
@@ -1493,6 +1839,7 @@
         const searchInput = document.getElementById('search-stock');
         if (searchInput) {
           searchInput.addEventListener('input', (e) => {
+            paginationState.stock.currentPage = 1;
             const tbody = document.getElementById('stock-table-body');
             tbody.innerHTML = renderStockTableRows(e.target.value);
           });
@@ -1721,6 +2068,8 @@
       const reader = new FileReader();
       reader.onload = async (event) => {
         try {
+          showLoading('กำลังอ่านไฟล์ Excel...');
+          
           const data = new Uint8Array(event.target.result);
           const workbook = XLSX.read(data, { type: 'array' });
           const sheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -1777,6 +2126,8 @@
             }
           }
           
+          hideLoading();
+          
           if (movements.length === 0) {
             showToast('ไม่พบข้อมูลที่ถูกต้อง', 'error');
             return;
@@ -1803,14 +2154,17 @@
           `;
           
           showModal('ยืนยันการนำเข้าข้อมูล', content, async () => {
+            showLoading('กำลังบันทึกข้อมูล...');
             for (const movement of movements) {
               await addStockMovement(movement);
             }
+            hideLoading();
             showToast(`นำเข้าข้อมูล ${movements.length} รายการเรียบร้อย`, 'success');
             renderApp();
           });
           
         } catch (error) {
+          hideLoading();
           showToast('เกิดข้อผิดพลาดในการอ่านไฟล์', 'error');
         }
       };
@@ -1825,6 +2179,8 @@
       const reader = new FileReader();
       reader.onload = async (event) => {
         try {
+          showLoading('กำลังอ่านไฟล์ Excel...');
+          
           const data = new Uint8Array(event.target.result);
           const workbook = XLSX.read(data, { type: 'array' });
           const sheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -1872,6 +2228,8 @@
             }
           }
           
+          hideLoading();
+          
           if (movements.length === 0) {
             showToast('ไม่พบข้อมูลที่ถูกต้องหรือสต็อกไม่เพียงพอ', 'error');
             return;
@@ -1892,14 +2250,17 @@
           `;
           
           showModal('ยืนยันการนำเข้าข้อมูล', content, async () => {
+            showLoading('กำลังบันทึกข้อมูล...');
             for (const movement of movements) {
               await addStockMovement(movement);
             }
+            hideLoading();
             showToast(`นำเข้าข้อมูล ${movements.length} รายการเรียบร้อย`, 'success');
             renderApp();
           });
           
         } catch (error) {
+          hideLoading();
           showToast('เกิดข้อผิดพลาดในการอ่านไฟล์', 'error');
         }
       };
@@ -1907,10 +2268,228 @@
       e.target.value = '';
     }
 
+    // Global Functions - Filter Toggle
+    window.toggleReceiveFilter = () => {
+      const panel = document.getElementById('receive-filter-panel');
+      const button = document.getElementById('toggle-receive-filter');
+      
+      if (panel.classList.contains('hidden')) {
+        panel.classList.remove('hidden');
+        button.textContent = 'ซ่อนตัวกรอง ▲';
+      } else {
+        panel.classList.add('hidden');
+        button.textContent = 'แสดงตัวกรอง ▼';
+      }
+    };
+
+    window.toggleIssueFilter = () => {
+      const panel = document.getElementById('issue-filter-panel');
+      const button = document.getElementById('toggle-issue-filter');
+      
+      if (panel.classList.contains('hidden')) {
+        panel.classList.remove('hidden');
+        button.textContent = 'ซ่อนตัวกรอง ▲';
+      } else {
+        panel.classList.add('hidden');
+        button.textContent = 'แสดงตัวกรอง ▼';
+      }
+    };
+
+    // Global Functions - Apply Filters
+    window.applyReceiveFilter = () => {
+      filterState.receive.startDate = document.getElementById('receive-filter-start').value;
+      filterState.receive.endDate = document.getElementById('receive-filter-end').value;
+      filterState.receive.productId = document.getElementById('receive-filter-product').value;
+      filterState.receive.ivNumber = document.getElementById('receive-filter-iv').value;
+      
+      paginationState.receive.currentPage = 1;
+      
+      const tbody = document.getElementById('receive-history-body');
+      tbody.innerHTML = renderReceiveHistoryRows();
+      
+      const filteredCount = getFilteredReceiveMovements().length;
+      showToast(`พบ ${filteredCount} รายการ`, 'success');
+    };
+
+    window.clearReceiveFilter = () => {
+      filterState.receive = {
+        startDate: null,
+        endDate: null,
+        productId: null,
+        ivNumber: null
+      };
+      
+      document.getElementById('receive-filter-start').value = '';
+      document.getElementById('receive-filter-end').value = '';
+      document.getElementById('receive-filter-product').value = '';
+      document.getElementById('receive-filter-iv').value = '';
+      
+      paginationState.receive.currentPage = 1;
+      
+      const tbody = document.getElementById('receive-history-body');
+      tbody.innerHTML = renderReceiveHistoryRows();
+      
+      showToast('ล้างตัวกรองเรียบร้อย', 'success');
+    };
+
+    window.applyIssueFilter = () => {
+      filterState.issue.startDate = document.getElementById('issue-filter-start').value;
+      filterState.issue.endDate = document.getElementById('issue-filter-end').value;
+      filterState.issue.productId = document.getElementById('issue-filter-product').value;
+      filterState.issue.ivNumber = document.getElementById('issue-filter-iv').value;
+      
+      paginationState.issue.currentPage = 1;
+      
+      const tbody = document.getElementById('issue-history-body');
+      tbody.innerHTML = renderIssueHistoryRows();
+      
+      const filteredCount = getFilteredIssueMovements().length;
+      showToast(`พบ ${filteredCount} รายการ`, 'success');
+    };
+
+    window.clearIssueFilter = () => {
+      filterState.issue = {
+        startDate: null,
+        endDate: null,
+        productId: null,
+        ivNumber: null
+      };
+      
+      document.getElementById('issue-filter-start').value = '';
+      document.getElementById('issue-filter-end').value = '';
+      document.getElementById('issue-filter-product').value = '';
+      document.getElementById('issue-filter-iv').value = '';
+      
+      paginationState.issue.currentPage = 1;
+      
+      const tbody = document.getElementById('issue-history-body');
+      tbody.innerHTML = renderIssueHistoryRows();
+      
+      showToast('ล้างตัวกรองเรียบร้อย', 'success');
+    };
+
+    // Global Functions - Export Filtered
+    window.exportFilteredStock = () => {
+      showLoading('กำลัง Export ข้อมูล...');
+      
+      setTimeout(() => {
+        try {
+          const filteredProducts = getFilteredStockProducts();
+          const data = filteredProducts.map(p => ({
+            'ชื่อสินค้า': p.name,
+            'หน่วยนับ': p.unit,
+            'คงเหลือ': getCurrentStock(p.id),
+            'สต็อกขั้นต่ำ': p.minStock,
+            'สถานะ': getCurrentStock(p.id) < p.minStock ? 'สต็อกต่ำ' : 'ปกติ'
+          }));
+          
+          const ws = XLSX.utils.json_to_sheet(data);
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, ws, 'สินค้าคงเหลือ');
+          XLSX.writeFile(wb, `stock_balance_${new Date().toISOString().split('T')[0]}.xlsx`);
+          
+          hideLoading();
+          showToast(`Export ${data.length} รายการเรียบร้อย`, 'success');
+        } catch (error) {
+          hideLoading();
+          showToast('เกิดข้อผิดพลาดในการ Export', 'error');
+        }
+      }, 100);
+    };
+
+    window.exportFilteredReceive = () => {
+      showLoading('กำลัง Export ข้อมูล...');
+      
+      setTimeout(() => {
+        try {
+          const filteredMovements = getFilteredReceiveMovements();
+          const data = filteredMovements.map(m => {
+            const product = products.find(p => p.id === m.productId);
+            const dateStr = formatDateThai(m.timestamp ? m.timestamp.toDate().toISOString().split('T')[0] : '');
+            return {
+              'วันที่': dateStr,
+              'ชื่อสินค้า': product?.name || '-',
+              'จำนวน': m.quantity,
+              'หน่วย': product?.unit || '',
+              'เลขที่ PO': m.poNumber || '-',
+              'เลขที่ IV': m.ivNumber
+            };
+          });
+          
+          const ws = XLSX.utils.json_to_sheet(data);
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, ws, 'รับเข้า');
+          XLSX.writeFile(wb, `receive_filtered_${new Date().toISOString().split('T')[0]}.xlsx`);
+          
+          hideLoading();
+          showToast(`Export ${data.length} รายการเรียบร้อย`, 'success');
+        } catch (error) {
+          hideLoading();
+          showToast('เกิดข้อผิดพลาดในการ Export', 'error');
+        }
+      }, 100);
+    };
+
+    window.exportFilteredIssue = () => {
+      showLoading('กำลัง Export ข้อมูล...');
+      
+      setTimeout(() => {
+        try {
+          const filteredMovements = getFilteredIssueMovements();
+          const data = filteredMovements.map(m => {
+            const product = products.find(p => p.id === m.productId);
+            const dateStr = formatDateThai(m.timestamp ? m.timestamp.toDate().toISOString().split('T')[0] : '');
+            return {
+              'วันที่': dateStr,
+              'ชื่อสินค้า': product?.name || '-',
+              'จำนวน': m.quantity,
+              'หน่วย': product?.unit || '',
+              'เลขที่ IV': m.ivNumber,
+              'เลขที่เอกสาร': m.docNumber || '-'
+            };
+          });
+          
+          const ws = XLSX.utils.json_to_sheet(data);
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, ws, 'จ่ายออก');
+          XLSX.writeFile(wb, `issue_filtered_${new Date().toISOString().split('T')[0]}.xlsx`);
+          
+          hideLoading();
+          showToast(`Export ${data.length} รายการเรียบร้อย`, 'success');
+        } catch (error) {
+          hideLoading();
+          showToast('เกิดข้อผิดพลาดในการ Export', 'error');
+        }
+      }, 100);
+    };
+
     // Global Functions
     window.switchMenu = (menu) => {
       currentMenu = menu;
+      // Reset pagination when switching menu
+      if (paginationState[menu]) {
+        paginationState[menu].currentPage = 1;
+      }
       renderApp();
+    };
+    
+    window.changeStockPage = (page) => {
+      paginationState.stock.currentPage = page;
+      const tbody = document.getElementById('stock-table-body');
+      const searchInput = document.getElementById('search-stock');
+      tbody.innerHTML = renderStockTableRows(searchInput?.value || '');
+    };
+    
+    window.changeReceivePage = (page) => {
+      paginationState.receive.currentPage = page;
+      const tbody = document.getElementById('receive-history-body');
+      tbody.innerHTML = renderReceiveHistoryRows();
+    };
+    
+    window.changeIssuePage = (page) => {
+      paginationState.issue.currentPage = page;
+      const tbody = document.getElementById('issue-history-body');
+      tbody.innerHTML = renderIssueHistoryRows();
     };
 
     window.sortStockTable = (sortBy) => {
@@ -1964,67 +2543,115 @@
     };
 
     window.downloadReceiveTemplate = () => {
-      const template = [
-        { 'วันที่': '2024-01-15', 'ชื่อสินค้า': 'ตัวอย่างสินค้า', 'จำนวน': 100.50, 'เลขที่ PO': 'PO001', 'เลขที่ IV': 'IV001' }
-      ];
-      const ws = XLSX.utils.json_to_sheet(template);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Template');
-      XLSX.writeFile(wb, 'template_receive.xlsx');
+      showLoading('กำลังสร้างไฟล์...');
+      
+      setTimeout(() => {
+        try {
+          const template = [
+            { 'วันที่': '2024-01-15', 'ชื่อสินค้า': 'ตัวอย่างสินค้า', 'จำนวน': 100.50, 'เลขที่ PO': 'PO001', 'เลขที่ IV': 'IV001' }
+          ];
+          const ws = XLSX.utils.json_to_sheet(template);
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, ws, 'Template');
+          XLSX.writeFile(wb, 'template_receive.xlsx');
+          
+          hideLoading();
+          showToast('ดาวน์โหลดแม่แบบสำเร็จ', 'success');
+        } catch (error) {
+          hideLoading();
+          showToast('เกิดข้อผิดพลาดในการดาวน์โหลด', 'error');
+        }
+      }, 100);
     };
 
     window.downloadIssueTemplate = () => {
-      const template = [
-        { 'วันที่': '2024-01-15', 'ชื่อสินค้า': 'ตัวอย่างสินค้า', 'จำนวน': 50.25, 'เลขที่ IV': 'IV001', 'เลขที่เอกสาร': 'DOC001' }
-      ];
-      const ws = XLSX.utils.json_to_sheet(template);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Template');
-      XLSX.writeFile(wb, 'template_issue.xlsx');
+      showLoading('กำลังสร้างไฟล์...');
+      
+      setTimeout(() => {
+        try {
+          const template = [
+            { 'วันที่': '2024-01-15', 'ชื่อสินค้า': 'ตัวอย่างสินค้า', 'จำนวน': 50.25, 'เลขที่ IV': 'IV001', 'เลขที่เอกสาร': 'DOC001' }
+          ];
+          const ws = XLSX.utils.json_to_sheet(template);
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, ws, 'Template');
+          XLSX.writeFile(wb, 'template_issue.xlsx');
+          
+          hideLoading();
+          showToast('ดาวน์โหลดแม่แบบสำเร็จ', 'success');
+        } catch (error) {
+          hideLoading();
+          showToast('เกิดข้อผิดพลาดในการดาวน์โหลด', 'error');
+        }
+      }, 100);
     };
 
     window.exportReceiveHistory = () => {
-      const data = stockMovements
-        .filter(m => m.type === 'receive')
-        .map(m => {
-          const product = products.find(p => p.id === m.productId);
-          const dateStr = formatDateThai(m.timestamp ? m.timestamp.toDate().toISOString().split('T')[0] : '');
-          return {
-            'วันที่': dateStr,
-            'ชื่อสินค้า': product?.name || '-',
-            'จำนวน': m.quantity,
-            'หน่วย': product?.unit || '',
-            'เลขที่ PO': m.poNumber || '-',
-            'เลขที่ IV': m.ivNumber
-          };
-        });
+      showLoading('กำลัง Export ข้อมูล...');
       
-      const ws = XLSX.utils.json_to_sheet(data);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'ประวัติรับเข้า');
-      XLSX.writeFile(wb, 'receive_history.xlsx');
+      setTimeout(() => {
+        try {
+          const data = stockMovements
+            .filter(m => m.type === 'receive')
+            .map(m => {
+              const product = products.find(p => p.id === m.productId);
+              const dateStr = formatDateThai(m.timestamp ? m.timestamp.toDate().toISOString().split('T')[0] : '');
+              return {
+                'วันที่': dateStr,
+                'ชื่อสินค้า': product?.name || '-',
+                'จำนวน': m.quantity,
+                'หน่วย': product?.unit || '',
+                'เลขที่ PO': m.poNumber || '-',
+                'เลขที่ IV': m.ivNumber
+              };
+            });
+          
+          const ws = XLSX.utils.json_to_sheet(data);
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, ws, 'ประวัติรับเข้า');
+          XLSX.writeFile(wb, 'receive_history.xlsx');
+          
+          hideLoading();
+          showToast('Export ไฟล์สำเร็จ', 'success');
+        } catch (error) {
+          hideLoading();
+          showToast('เกิดข้อผิดพลาดในการ Export', 'error');
+        }
+      }, 100);
     };
 
     window.exportIssueHistory = () => {
-      const data = stockMovements
-        .filter(m => m.type === 'issue')
-        .map(m => {
-          const product = products.find(p => p.id === m.productId);
-          const dateStr = formatDateThai(m.timestamp ? m.timestamp.toDate().toISOString().split('T')[0] : '');
-          return {
-            'วันที่': dateStr,
-            'ชื่อสินค้า': product?.name || '-',
-            'จำนวน': m.quantity,
-            'หน่วย': product?.unit || '',
-            'เลขที่ IV': m.ivNumber,
-            'เลขที่เอกสาร': m.docNumber || '-'
-          };
-        });
+      showLoading('กำลัง Export ข้อมูล...');
       
-      const ws = XLSX.utils.json_to_sheet(data);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'ประวัติจ่ายออก');
-      XLSX.writeFile(wb, 'issue_history.xlsx');
+      setTimeout(() => {
+        try {
+          const data = stockMovements
+            .filter(m => m.type === 'issue')
+            .map(m => {
+              const product = products.find(p => p.id === m.productId);
+              const dateStr = formatDateThai(m.timestamp ? m.timestamp.toDate().toISOString().split('T')[0] : '');
+              return {
+                'วันที่': dateStr,
+                'ชื่อสินค้า': product?.name || '-',
+                'จำนวน': m.quantity,
+                'หน่วย': product?.unit || '',
+                'เลขที่ IV': m.ivNumber,
+                'เลขที่เอกสาร': m.docNumber || '-'
+              };
+            });
+          
+          const ws = XLSX.utils.json_to_sheet(data);
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, ws, 'ประวัติจ่ายออก');
+          XLSX.writeFile(wb, 'issue_history.xlsx');
+          
+          hideLoading();
+          showToast('Export ไฟล์สำเร็จ', 'success');
+        } catch (error) {
+          hideLoading();
+          showToast('เกิดข้อผิดพลาดในการ Export', 'error');
+        }
+      }, 100);
     };
 
     window.importProductsExcel = () => {
@@ -2038,6 +2665,8 @@
         const reader = new FileReader();
         reader.onload = async (event) => {
           try {
+            showLoading('กำลังอ่านไฟล์ Excel...');
+            
             const data = new Uint8Array(event.target.result);
             const workbook = XLSX.read(data, { type: 'array' });
             const sheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -2054,6 +2683,8 @@
               }
             }
             
+            hideLoading();
+            
             if (newProducts.length === 0) {
               showToast('ไม่พบข้อมูลที่ถูกต้อง', 'error');
               return;
@@ -2069,14 +2700,17 @@
             `;
             
             showModal('ยืนยันการนำเข้าสินค้า', content, async () => {
+              showLoading('กำลังบันทึกข้อมูล...');
               for (const product of newProducts) {
                 await addProduct(product);
               }
+              hideLoading();
               showToast(`นำเข้าสินค้า ${newProducts.length} รายการเรียบร้อย`, 'success');
               renderApp();
             });
             
           } catch (error) {
+            hideLoading();
             showToast('เกิดข้อผิดพลาดในการอ่านไฟล์', 'error');
           }
         };
@@ -2086,17 +2720,29 @@
     };
 
     window.exportProductsExcel = () => {
-      const data = products.map(p => ({
-        'ชื่อสินค้า': p.name,
-        'หน่วยนับ': p.unit,
-        'สต็อกขั้นต่ำ': p.minStock,
-        'คงเหลือปัจจุบัน': getCurrentStock(p.id)
-      }));
+      showLoading('กำลัง Export ข้อมูล...');
       
-      const ws = XLSX.utils.json_to_sheet(data);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'สินค้า');
-      XLSX.writeFile(wb, 'products.xlsx');
+      setTimeout(() => {
+        try {
+          const data = products.map(p => ({
+            'ชื่อสินค้า': p.name,
+            'หน่วยนับ': p.unit,
+            'สต็อกขั้นต่ำ': p.minStock,
+            'คงเหลือปัจจุบัน': getCurrentStock(p.id)
+          }));
+          
+          const ws = XLSX.utils.json_to_sheet(data);
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, ws, 'สินค้า');
+          XLSX.writeFile(wb, 'products.xlsx');
+          
+          hideLoading();
+          showToast('Export ไฟล์สำเร็จ', 'success');
+        } catch (error) {
+          hideLoading();
+          showToast('เกิดข้อผิดพลาดในการ Export', 'error');
+        }
+      }, 100);
     };
 
     window.quickReceive = (productId, suggestedQty) => {
@@ -2238,7 +2884,7 @@
         }
         
         try {
-          showLoading();
+          showLoading('กำลังแก้ไขรายการ...');
           
           // ลบรายการเก่าและสร้างใหม่
           await db.collection('stockMovements').doc(movementId).delete();
@@ -2285,7 +2931,7 @@
       
       showModal('ยืนยันการลบรายการ', content, async () => {
         try {
-          showLoading();
+          showLoading('กำลังลบรายการ...');
           await db.collection('stockMovements').doc(movementId).delete();
           await loadStockMovements();
           hideLoading();
@@ -2313,5 +2959,5 @@
 
     initElementSDK();
   </script>
- <script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9bc93d8117d27b5c',t:'MTc2ODE4NTExNC4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+ <script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9c04462557bcd00c',t:'MTc2ODgwNDEyNy4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
